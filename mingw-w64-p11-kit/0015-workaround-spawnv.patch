@@ -1,0 +1,136 @@
+--- p11-kit-0.25.5/common/path.c.orig	2024-11-14 17:08:54.420868300 +0900
++++ p11-kit-0.25.5/common/path.c	2024-11-14 17:05:46.144188400 +0900
+@@ -205,7 +205,7 @@
+ p11_path_build (const char *path,
+                 ...)
+ {
+-#ifdef OS_WIN32
++#if defined(OS_WIN32) && !defined(__MINGW32__) && !defined(__MSYS__) && !defined(__CYGWIN__)
+ 	const char delim = '\\';
+ #else
+ 	const char delim = '/';
+--- p11-kit-0.25.5/p11-kit/p11-kit.c.orig	2024-11-14 17:08:54.576118500 +0900
++++ p11-kit-0.25.5/p11-kit/p11-kit.c	2024-11-14 15:02:03.507944600 +0900
+@@ -120,10 +120,88 @@
+ 	{ 0, }
+ };
+ 
++#ifdef OS_WIN32
++/* Windows "_spawnv" simply concatenates ARGV with a space in between
++ * and passes it as a single string to the child process. The called
++ * child process re-parses the argument and splits it into ARGV.
++ *
++ * Thus, if ARGV contains spaces, double quotes or backslashes, they
++ * must be escaped/quoted.
++ *
++ * Note that MINGW64's handling of multibyte characters is broken,
++ * so I have deliberately decided not to do any multibyte character
++ * specific processing. */
++static char *
++escape_argv0(char *argv0)
++{
++	size_t len;
++	char *new_argv0;
++
++	len = strlen(argv0);
++	new_argv0 = malloc(1 + len + 1 + 1); /* '"' + argv0 + '"' + '\0' */
++	new_argv0[0] = '"';
++	memcpy(new_argv0 + 1, argv0, len);
++	new_argv0[1 + len] = '"';
++	new_argv0[1 + len + 1] = '\0';
++	return new_argv0;
++}
++
++static char *
++escape_argv1(char **argv)
++{
++	size_t maxlen;
++	char *new_argv1;
++	char *d, *s;
++
++	maxlen = 0;
++	for (int i = 0; argv[i]; i++) {
++		maxlen += 1 + strlen(argv[i]) * 2 + 1 + 1; /* '"' + escaped argv[i] + '"' + (' ' or '\0') */
++	}
++	d = new_argv1 = malloc(maxlen);
++	for (int i = 0; argv[i]; i++) {
++		char c;
++
++		*d++ = '"';
++		s = argv[i];
++		while ((c = *s++)) {
++			switch (c) {
++			case '"':
++			case '\\':
++				*d++ = '\\';
++				/* fall through */
++			default:
++				*d++ = c;
++				break;
++			}
++		}
++		*d++ = '"';
++		*d++ = ' ';
++	}
++	d[-1] = '\0';
++	return new_argv1;
++}
++#endif
++
+ int
+ p11_kit_trust (int argc,
+                char *argv[])
+ {
++#ifdef OS_WIN32
++	char *path;
++	char *args[3];
++	intptr_t code;
++
++	path = p11_path_relocation(BINDIR "/trust" EXEEXT);
++	args[0] = escape_argv0(path);
++	args[1] = escape_argv1(argv + 1);
++	args[2] = NULL;
++
++	code = _spawnv (_P_WAIT, path, (const char **) args);
++
++	free(args[1]);
++	free(args[0]);
++	free(path);
++#else /* !OS_WIN32 */
+ 	char **args;
+ 	intptr_t code;
+ 
+@@ -138,6 +216,7 @@
+ 
+ 	free (argv[0]);
+ 	free (args);
++#endif
+ 
+ 	if (code) {
+ 		/* At this point we have no command */
+@@ -176,13 +255,21 @@
+ 	path = p11_path_build (private_dir, filename, NULL);
+ 	return_val_if_fail (path != NULL, 1);
+ 
+-	/* Windows execv() requires the first element of ARGV must be
+-	 * the executable name */
+ #ifdef OS_WIN32
+-	argv[0] = path;
+-#endif
++	{
++		char *args[3];
++
++		args[0] = escape_argv0(path);
++		args[1] = escape_argv1(argv + 1);
++		args[2] = NULL;
++		code = _spawnv (_P_WAIT, path, (const char **) args);
++		free (args[1]);
++		free (args[0]);
++	}
++#else /* !OS_WIN32 */
+ 	argv[argc] = NULL;
+ 	code = _spawnv (_P_WAIT, path, argv);
++#endif
+ 
+ 	free (filename);
+ 	free (path);
